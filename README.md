@@ -7,6 +7,14 @@ Drag a URDF into a self-drawn Qt window to inspect it (MuJoCo off-screen renderi
 drag joint sliders, and toggle coordinate frames / grid. The menu bar switches between English and
 Chinese at runtime.
 
+| Empty window (drop target) | URDF loaded |
+|---|---|
+| ![Empty view](assert/soft-empty-view.png) | ![Loaded view](assert/open-urdf-view.png) |
+
+### Demo
+
+https://private-user-images.githubusercontent.com/34444109/694283238-976c9b32-3dbb-42fb-b1d3-9996dcee1c40.mp4
+
 Dependencies: mujoco, numpy, PySide6.
 
 ## Install

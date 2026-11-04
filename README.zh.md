@@ -5,6 +5,14 @@
 拖放 URDF 到自绘 Qt 窗口查看（MuJoCo 离屏渲染，不用原生 `mujoco.viewer`）。点选某个连杆的
 visual/collision 可在仿真中高亮并预览对应 STL，拖动关节滑条，开关坐标系/网格。菜单栏支持中英文实时切换。
 
+| 空窗口（拖放区） | 已加载 URDF |
+|---|---|
+| ![空视图](assert/soft-empty-view.png) | ![加载视图](assert/open-urdf-view.png) |
+
+### 演示
+
+https://private-user-images.githubusercontent.com/34444109/694283238-976c9b32-3dbb-42fb-b1d3-9996dcee1c40.mp4
+
 依赖：mujoco、numpy、PySide6。
 
 ## 安装
