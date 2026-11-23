@@ -5,3 +5,9 @@ dist/
 build/
 *.egg-info/
 .pytest_cache/
+.vscode/
+*.zip
+SHA256SUMS.txt
+RELEASE_NOTES.md
+# 演示视频走 GitHub 托管，不入库
+assets/*.mp4

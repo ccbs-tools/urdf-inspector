@@ -1,8 +1,11 @@
 name: Build (PyInstaller)
 
 # 触发方式：
-#   1) 在 Actions 页面手动点 "Run workflow"（workflow_dispatch）
-#   2) 推送 v 开头的 tag（如 v0.1.0）时，自动打包并发布 Release
+#   1) 在 Actions 页面手动点 "Run workflow"（workflow_dispatch）：只打包，产物在 Artifacts
+#   2) 推送 v 开头的 tag（如 v0.1.0）：打包并发布 Release 到本仓库
+#
+# 适用于源码公开的仓库。源码私有、要把 Release 发到独立公开仓库的，用 build.release-repo.yml。
+# 发版步骤见 dev.md（__init__.py / pyproject.toml / changelog.py 三处版本号要一致）。
 on:
   workflow_dispatch:
   push:
@@ -10,7 +13,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write   # 发布 Release 需要
+  contents: write   # 在本仓库创建 Release 需要
 
 jobs:
   build-windows:
@@ -20,16 +23,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.11"
+          enable-cache: true
 
       - name: Install dependencies
+        run: uv sync --group dev
+
+      # 规则：changelog.py 的 RELEASE_REPO 不含 "release" 字样 → 源码公开，Release 发到本仓库，
+      # 所以它必须等于本仓库全名。含 "release" 字样说明应当用 build.release-repo.yml。
+      - name: Check release target
+        shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          pip install .
-          pip install pyinstaller
+          $m = Select-String -Path urdf_inspector/changelog.py -Pattern '^RELEASE_REPO\s*=\s*"([^"]+)"'
+          if (-not $m) { Write-Error "RELEASE_REPO not found in urdf_inspector/changelog.py"; exit 1 }
+          $target = $m.Matches.Groups[1].Value
+          Write-Host "changelog RELEASE_REPO=$target  github.repository=$env:GITHUB_REPOSITORY"
+          if ($target -match 'release') {
+            Write-Error "RELEASE_REPO '$target' contains 'release': this means the source repo is private and releases go to a separate public repo. Use build.release-repo.yml instead of this workflow (see dev-rules/CONVENTIONS.md §8)."
+            exit 1
+          }
+          if ($target -ne $env:GITHUB_REPOSITORY) {
+            Write-Error "RELEASE_REPO '$target' must equal this repository '$env:GITHUB_REPOSITORY' when publishing to the source repo."
+            exit 1
+          }
 
       - name: Resolve version
         id: ver
@@ -44,8 +62,22 @@ jobs:
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "version = $v"
 
+      - name: Check version consistency (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          $py = (Select-String -Path pyproject.toml -Pattern '^version\s*=\s*"(.+)"').Matches.Groups[1].Value
+          $init = (Select-String -Path urdf_inspector/__init__.py -Pattern '__version__\s*=\s*"(.+)"').Matches.Groups[1].Value
+          Write-Host "tag=$env:VER pyproject=$py __init__=$init"
+          if ($py -ne $env:VER -or $init -ne $env:VER) {
+            Write-Error "version mismatch: tag=$env:VER pyproject=$py __init__=$init (see dev.md)"
+            exit 1
+          }
+
       - name: Build with PyInstaller
-        run: pyinstaller urdf_inspector.spec --noconfirm
+        run: uv run pyinstaller main.spec --noconfirm
 
       - name: Package zip
         id: pack
@@ -64,9 +96,50 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Publish Release (on tag)
+      # ---------- 以下仅在推 tag 时执行：发布到本仓库 Releases ----------
+
+      - name: Release notes from changelog.py
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ steps.pack.outputs.zip }}
-          generate_release_notes: true
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"   # Windows runner 默认 cp1252，print 中文会崩
+          VER: ${{ steps.ver.outputs.version }}
+          ZIP: ${{ steps.pack.outputs.zip }}
+        run: |
+          @'
+          import os
+          from urdf_inspector.changelog import RELEASES, release_notes
+
+          ver, zip_name = os.environ["VER"], os.environ["ZIP"]
+          entry = next((e for e in RELEASES if e["version"] == ver), None)
+          lines = [f"## urdf-inspector v{ver}", ""]
+          if entry is None:
+              lines.append(f"（changelog.py 中没有 {ver} 的条目，请补充 RELEASES）")
+          else:
+              lines.append(f"发布日期 / Date: {entry.get('date', '')}")
+              lines += ["", "### 更新内容"] + [f"- {s}" for s in release_notes(entry, "zh")]
+              lines += ["", "### Changes"] + [f"- {s}" for s in release_notes(entry, "en")]
+          lines += ["", "### 下载 / Download", f"- Windows x64: `{zip_name}`（解压后运行 urdf-inspector.exe）",
+                    "- 校验: `SHA256SUMS.txt`"]
+          with open("RELEASE_NOTES.md", "w", encoding="utf-8") as f:
+              f.write("\n".join(lines) + "\n")
+          print(open("RELEASE_NOTES.md", encoding="utf-8").read())
+          '@ | Set-Content -Path release_notes.py -Encoding UTF8
+          uv run python release_notes.py
+
+      - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ZIP: ${{ steps.pack.outputs.zip }}
+        run: |
+          set -euo pipefail
+          sha256sum "$ZIP" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release create "$TAG" "$ZIP" SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "urdf-inspector $TAG" \
+            --notes-file RELEASE_NOTES.md
+          echo "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}" >> "$GITHUB_STEP_SUMMARY"

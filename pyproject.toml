@@ -2,9 +2,9 @@
 name = "urdf-inspector"
 version = "0.1.0"
 description = "拖放 URDF 到自绘窗口查看（MuJoCo 离屏渲染 + Qt）"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dependencies = [
-    "mujoco>=3.1",
+    "mujoco>=4.0.1",
     "numpy>=1.22",
     "PySide6-Essentials>=6.5",
     "loguru>=0.7",
@@ -12,6 +12,11 @@ dependencies = [
 
 [project.scripts]
 urdf-inspector = "urdf_inspector.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.10",
+]
 
 [build-system]
 requires = ["hatchling"]

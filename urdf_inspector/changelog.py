@@ -1,6 +1,7 @@
 """版本历史 + GitHub Releases 更新检查。
 
-发新版本时在 RELEASES 最前面加一条，同时改 pyproject.toml / __version__。
+发新版本时在 RELEASES 最前面加一条，同时改 pyproject.toml / __init__.py 的版本号（见 dev.md）。
+GitHub Actions 发布 Release 时用这里的文字生成说明，中英文 notes 都要写。
 """
 
 from __future__ import annotations
@@ -17,18 +18,25 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Optional
 
+from . import APP_NAME
 from . import __version__ as APP_VERSION
 from .log import logger
 
-REPO_HOME = "https://github.com/ccbs-tools/urdf-inspector"
-# 视频教程占位：有正式地址后改这里即可
-VIDEO_TUTORIAL = "https://github.com/ccbs-tools/urdf-inspector#demo"
-# 方式一：网页 /releases/latest 会 302 到 /releases/tag/<tag>，没有 API 的 60 次/小时限额
+# 发 Release 的仓库，同时决定发布方式（CI 会校验，见 CONVENTIONS.md §6/§8）：
+#   - 不含 "release" 字样 → 源码公开，Release 发到本仓库，这里必须写本仓库全名
+#   - 含 "release" 字样（固定 ccbs-tools/urdf-inspector-release）→ 源码私有，
+#     CI 用 GitHub App Secrets（RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY）把 Release 发到那个公开仓库，
+#     工作流要换成 build.release-repo.yml
+RELEASE_REPO = "ccbs-tools/urdf-inspector"
+REPO_HOME = f"https://github.com/{RELEASE_REPO}"
+# 视频教程地址；None 表示帮助菜单不显示该项。目前指向 README 的 Demo 一节，有正式地址后改这里
+VIDEO_TUTORIAL: Optional[str] = f"{REPO_HOME}#demo"
+# 方式一：网页 /releases/latest 会 302 到 /releases/tag/<tag>，不占 API 的 60 次/小时限额
 RELEASES_LATEST_PAGE = f"{REPO_HOME}/releases/latest"
-# 方式二：REST API（未登录按 IP 限 60 次/小时，走共享代理时容易 403）
-RELEASES_API = "https://api.github.com/repos/ccbs-tools/urdf-inspector/releases/latest"
+# 方式二：REST API（未登录按 IP 限 60 次/小时，走共享出口时容易 403）
+RELEASES_API = f"https://api.github.com/repos/{RELEASE_REPO}/releases/latest"
 # 与 .github/workflows/build.yml 里 "Package zip" 的命名保持一致
-ASSET_NAME_FMT = "urdf-inspector-v{ver}-windows-x64.zip"
+ASSET_NAME_FMT = APP_NAME + "-v{ver}-windows-x64.zip"
 # 检查更新总预算：两种方式并发竞速，谁先成功用谁；与对话框倒计时一致
 UPDATE_CHECK_TIMEOUT_S = 20.0
 
@@ -67,6 +75,7 @@ def parse_version_tuple(s: str) -> Optional[tuple[int, ...]]:
         return None
     parts: list[int] = []
     for p in s.split("."):
+        # 允许 0.1.0+abc 这种本地构建后缀：只取数字前缀
         digits = ""
         for ch in p:
             if ch.isdigit():
@@ -94,7 +103,7 @@ def cmp_version(a: str, b: str) -> Optional[int]:
     return 0
 
 
-_UA = {"User-Agent": f"urdf-inspector/{APP_VERSION}"}
+_UA = {"User-Agent": f"{APP_NAME}/{APP_VERSION}"}
 
 
 def _latest_via_page(timeout_s: float) -> tuple[str, Optional[str]]:
@@ -124,7 +133,7 @@ def _latest_via_api(timeout_s: float) -> tuple[str, Optional[str]]:
     with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         remaining = resp.headers.get("X-RateLimit-Remaining")
         data = json.loads(resp.read().decode("utf-8"))
-    logger.debug("[api] status ok, rate-limit remaining={}, assets={}",
+    logger.debug("[api] ok, rate-limit remaining={}, assets={}",
                  remaining, [a.get("name") for a in data.get("assets") or []])
     tag = str(data.get("tag_name") or "").strip()
     if not tag:
@@ -171,8 +180,8 @@ def describe_error(exc: BaseException) -> str:
 
 
 _METHODS: tuple[tuple[str, Callable[[float], tuple[str, Optional[str]]]], ...] = (
-    ("网页跳转", _latest_via_page),
-    ("API", _latest_via_api),
+    ("page", _latest_via_page),
+    ("api", _latest_via_api),
 )
 
 _check_seq = 0
@@ -182,7 +191,7 @@ _check_seq_lock = threading.Lock()
 def check_latest_release(timeout_s: float = UPDATE_CHECK_TIMEOUT_S) -> tuple[str, Optional[str]]:
     """查询 GitHub Releases 最新版。返回 (version, windows_zip_url)。
 
-    两种方式**并发竞速**，谁先成功就用谁的结果；全部失败才抛异常（带各自原因）。
+    两种方式并发竞速，谁先成功就用谁的结果；全部失败才抛异常（带各自原因）。
     timeout_s 是总预算，与对话框倒计时一致：到点还没有任何成功就抛 TimeoutError，
     迟到的结果只记日志不再使用。在后台线程里跑，可以阻塞。
     """
@@ -192,7 +201,7 @@ def check_latest_release(timeout_s: float = UPDATE_CHECK_TIMEOUT_S) -> tuple[str
         seq = _check_seq
     tag = f"#{seq}"
 
-    logger.info("{} 检查更新开始 | 当前 v{} | 预算 {:.0f}s | 并发方式: {}",
+    logger.info("{} update check start | current v{} | budget {:.0f}s | methods: {}",
                 tag, APP_VERSION, timeout_s, " / ".join(n for n, _ in _METHODS))
     t0 = time.perf_counter()
     results: "queue.Queue[tuple[str, bool, object, float]]" = queue.Queue()
@@ -202,11 +211,11 @@ def check_latest_release(timeout_s: float = UPDATE_CHECK_TIMEOUT_S) -> tuple[str
         try:
             payload = fn(timeout_s)
             dt = (time.perf_counter() - t) * 1000
-            logger.debug("{} [{}] 完成 ok 耗时 {:.0f} ms -> {}", tag, name, dt, payload)
+            logger.debug("{} [{}] ok in {:.0f} ms -> {}", tag, name, dt, payload)
             results.put((name, True, payload, dt))
         except Exception as exc:  # noqa: BLE001
             dt = (time.perf_counter() - t) * 1000
-            logger.debug("{} [{}] 完成 fail 耗时 {:.0f} ms -> {!r}", tag, name, dt, exc)
+            logger.debug("{} [{}] failed in {:.0f} ms -> {!r}", tag, name, dt, exc)
             results.put((name, False, exc, dt))
 
     for name, fn in _METHODS:
@@ -224,20 +233,20 @@ def check_latest_release(timeout_s: float = UPDATE_CHECK_TIMEOUT_S) -> tuple[str
             break
         if ok:
             ver, url = payload  # type: ignore[misc]
-            logger.info("{} 检查更新成功 [胜出方式={}] 最新 v{} | 下载 {} | 该方式耗时 {:.0f} ms | 总耗时 {:.0f} ms{}",
+            logger.info("{} update check ok [winner={}] latest v{} | download {} | method {:.0f} ms | total {:.0f} ms{}",
                         tag, name, ver, url, dt, (time.perf_counter() - t0) * 1000,
-                        f" | 已失败: {list(errors)}" if errors else "")
+                        f" | failed: {list(errors)}" if errors else "")
             return ver, url
         errors[name] = payload  # type: ignore[assignment]
-        logger.warning("{} [{}] 失败 ({:.0f} ms): {!r}，等待其它方式", tag, name, dt, payload)
+        logger.warning("{} [{}] failed ({:.0f} ms): {!r}, waiting for other methods", tag, name, dt, payload)
 
     total_ms = (time.perf_counter() - t0) * 1000
     if len(errors) < len(_METHODS):
         pending = [n for n, _ in _METHODS if n not in errors]
-        logger.error("{} 预算 {:.0f}s 用尽，仍无成功结果 | 已失败 {} | 仍在等待 {} | 总耗时 {:.0f} ms",
+        logger.error("{} budget {:.0f}s exhausted without success | failed {} | pending {} | total {:.0f} ms",
                      tag, timeout_s, list(errors), pending, total_ms)
-        raise TimeoutError(f"{timeout_s:.0f}s 内没有任何方式返回成功")
-    logger.error("{} 两种方式均失败 | {} | 总耗时 {:.0f} ms", tag,
+        raise TimeoutError(f"no method succeeded within {timeout_s:.0f}s")
+    logger.error("{} all methods failed | {} | total {:.0f} ms", tag,
                  "; ".join(f"{n}: {e!r}" for n, e in errors.items()), total_ms)
     raise UpdateCheckError({n: describe_error(e) for n, e in errors.items()})
 

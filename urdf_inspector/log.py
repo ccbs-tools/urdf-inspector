@@ -1,19 +1,26 @@
 """日志（loguru）。
 
-文件：~/.ccbs/urdf-inspector/app.log，单文件最大 10 MB，最多保留 3 个（含当前）。
+文件：%APPDATA%\\ccbs\\urdf-inspector\\logs\\app.log，10 MB 轮转，保留 3 个（含当前）。
 用法：
     from .log import logger
     logger.info("...")
+
+日志文本一律英文，不走 i18n。不得记录密码、口令或任何解密后的秘密。
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import sys
 from pathlib import Path
 
 from loguru import logger
 
-LOG_DIR = Path.home() / ".ccbs" / "urdf-inspector"
+from . import APP_NAME, ORG
+
+APP_DATA_DIR = Path(os.environ.get("APPDATA") or Path.home()) / ORG / APP_NAME
+LOG_DIR = APP_DATA_DIR / "logs"
 LOG_FILE = LOG_DIR / "app.log"
 ROTATION = "10 MB"
 RETENTION = 3
@@ -24,7 +31,7 @@ _FILE_FMT = (
 )
 _CONSOLE_FMT = (
     "<green>{time:HH:mm:ss.SSS}</green> | <level>{level:<7}</level> | "
-    "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | {message}"
+    "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | <level>{message}</level>"
 )
 
 _configured = False
@@ -49,22 +56,40 @@ def setup_logging(console_level: str = "INFO") -> Path:
         rotation=ROTATION,
         retention=RETENTION,
         encoding="utf-8",
-        enqueue=True,          # 后台线程（检查更新）也能安全写
+        enqueue=True,       # 后台线程也能安全写
         backtrace=False,
-        diagnose=False,
+        diagnose=False,     # 不 dump 局部变量（可能含秘密）
     )
 
     sys.excepthook = _excepthook
+    _install_stdlib_bridge()
     _install_qt_handler()
     return LOG_FILE
 
 
 def _excepthook(exc_type, exc, tb) -> None:
-    logger.opt(exception=(exc_type, exc, tb)).critical("未捕获的异常")
+    logger.opt(exception=(exc_type, exc, tb)).critical("Unhandled exception")
+
+
+class _InterceptHandler(logging.Handler):
+    """把 stdlib `logging` 的记录（第三方库）转进 loguru。"""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        logger.opt(depth=6, exception=record.exc_info).log(level, "[{}] {}", record.name, record.getMessage())
+
+
+def _install_stdlib_bridge() -> None:
+    logging.basicConfig(handlers=[_InterceptHandler()], level=logging.INFO, force=True)
+    # 太吵的第三方 logger 在这里单独调级别，例如：
+    # logging.getLogger("paramiko").setLevel(logging.INFO)
 
 
 def _install_qt_handler() -> None:
-    """把 Qt 自己的 qWarning / qCritical 也写进日志。"""
+    """把 Qt 自己的 qWarning / qCritical 写进日志。"""
     try:
         from PySide6 import QtCore
     except Exception:  # noqa: BLE001
@@ -84,4 +109,4 @@ def _install_qt_handler() -> None:
     QtCore.qInstallMessageHandler(handler)
 
 
-__all__ = ["logger", "setup_logging", "LOG_DIR", "LOG_FILE"]
+__all__ = ["logger", "setup_logging", "APP_DATA_DIR", "LOG_DIR", "LOG_FILE"]

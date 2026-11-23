@@ -16,6 +16,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from .i18n import i18n, tr
+from .log import logger
 from .meshio import load_mesh
 from .viewport import close_renderer, release_qt_gl_context
 
@@ -96,6 +97,7 @@ class StlPreview(QWidget):
             lo, hi, n_faces = verts.min(axis=0), verts.max(axis=0), len(faces)
             model = self._build_model(verts, faces, lo, hi)
         except Exception as exc:  # noqa: BLE001
+            logger.warning("STL preview load failed: {} -> {!r}", path, exc)
             self.clear(tr("stl.load_fail_box", name=path.name, err=exc))
             self.statusMessage.emit(tr("stl.load_fail_status", err=exc))
             return False
@@ -340,6 +342,7 @@ class StlPreview(QWidget):
         release_qt_gl_context()
         self._w, self._h = w, h
         self._dirty = True
+        logger.debug("STL preview renderer created {}x{}", w, h)
 
     def _add_line(self, scene, a, b, rgba, width: float) -> None:
         if scene.ngeom >= scene.maxgeom:
@@ -403,6 +406,7 @@ class StlPreview(QWidget):
             self._img = QImage(self._buf.data, w, h, 3 * w, QImage.Format.Format_RGB888)
             self._dirty = False
         except Exception as exc:  # noqa: BLE001
+            logger.warning("STL preview render failed: {!r}", exc)
             self.statusMessage.emit(tr("stl.render_err", err=exc))
             self._img = None
             self._dirty = False

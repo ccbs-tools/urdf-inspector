@@ -5,7 +5,8 @@
     label.setText(tr("opts.box"))
     i18n.languageChanged.connect(self.retranslate)
 
-语言保存在 QSettings（组织 CCBS / 程序 urdf inspector），首次运行默认英文。
+语言保存在 QSettings（组织 ORG / 应用 APP_NAME，见 __init__.py）。首次运行跟随系统：系统是中文 → zh，否则 → en。
+新增文案：两张表各加一条，键名用 `模块.含义`。
 """
 
 from __future__ import annotations
@@ -14,8 +15,8 @@ from PySide6 import QtCore
 
 from .log import logger
 
-DEFAULT_LANG = "en"
 LANGUAGES = (("en", "English"), ("zh", "中文（简体）"))
+_FALLBACK_LANG = "en"
 _SETTINGS_KEY = "language"
 
 _STRINGS: dict[str, dict[str, str]] = {
@@ -35,6 +36,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "menu.video": "&Video Tutorial",
         "menu.changelog": "Version &Info",
         "menu.check_update": "Check for &Updates",
+        "menu.open_log_dir": "Open &Log Folder",
         "chg.title": "Version info  (current v{ver})",
         "chg.check": "Check for updates",
         "chg.close": "Close",
@@ -103,6 +105,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "menu.video": "视频教程(&V)",
         "menu.changelog": "版本介绍(&I)",
         "menu.check_update": "检查更新(&U)",
+        "menu.open_log_dir": "打开日志目录(&L)",
         "chg.title": "版本介绍（当前 v{ver}）",
         "chg.check": "检查版本更新",
         "chg.close": "关闭",
@@ -158,12 +161,16 @@ _STRINGS: dict[str, dict[str, str]] = {
 }
 
 
+def _system_default() -> str:
+    return "zh" if QtCore.QLocale.system().language() == QtCore.QLocale.Language.Chinese else "en"
+
+
 class _I18n(QtCore.QObject):
     languageChanged = QtCore.Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
-        self._lang = DEFAULT_LANG
+        self._lang = _FALLBACK_LANG
 
     @property
     def lang(self) -> str:
@@ -171,22 +178,22 @@ class _I18n(QtCore.QObject):
 
     def load(self) -> str:
         """从 QSettings 读取上次选择的语言；需在 QApplication 创建后调用。"""
-        saved = QtCore.QSettings().value(_SETTINGS_KEY, DEFAULT_LANG)
-        self._lang = saved if saved in _STRINGS else DEFAULT_LANG
-        logger.info("语言: {} (设置中保存的值={!r})", self._lang, saved)
+        saved = QtCore.QSettings().value(_SETTINGS_KEY)
+        self._lang = saved if saved in _STRINGS else _system_default()
+        logger.info("language: {} (saved={!r}, system={})", self._lang, saved, QtCore.QLocale.system().name())
         return self._lang
 
     def set(self, lang: str) -> None:
         if lang not in _STRINGS or lang == self._lang:
             return
-        logger.info("切换语言 {} -> {}", self._lang, lang)
+        logger.info("language switched {} -> {}", self._lang, lang)
         self._lang = lang
         QtCore.QSettings().setValue(_SETTINGS_KEY, lang)
         self.languageChanged.emit(lang)
 
     def tr(self, key: str, **kwargs) -> str:
         table = _STRINGS.get(self._lang, {})
-        text = table.get(key) or _STRINGS[DEFAULT_LANG].get(key) or key
+        text = table.get(key) or _STRINGS[_FALLBACK_LANG].get(key) or key
         return text.format(**kwargs) if kwargs else text
 
 
@@ -195,3 +202,6 @@ i18n = _I18n()
 
 def tr(key: str, **kwargs) -> str:
     return i18n.tr(key, **kwargs)
+
+
+__all__ = ["LANGUAGES", "i18n", "tr"]

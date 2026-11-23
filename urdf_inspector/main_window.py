@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -11,7 +10,7 @@ from typing import Dict, List, Optional, Set
 import mujoco
 import numpy as np
 from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QIcon, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
@@ -34,7 +33,7 @@ from PySide6.QtWidgets import (
 
 from .changelog import REPO_HOME, VIDEO_TUTORIAL
 from .i18n import LANGUAGES, i18n, tr
-from .log import logger
+from .log import LOG_DIR, logger
 from .model import BuiltModel, GeomInfo, ViewOptions, build_model
 from .stl_view import StlPreview
 from .version_dialogs import ChangelogDialog, UpdateCheckDialog
@@ -45,28 +44,6 @@ HL_COLLISION = np.array([1.0, 0.45, 0.08, 1.0], dtype=np.float64)
 DIM_ALPHA = 0.12
 ROLE_GEOM_ID = Qt.ItemDataRole.UserRole
 ROLE_KIND = Qt.ItemDataRole.UserRole + 1
-
-
-def _icon_search_dirs() -> list[Path]:
-    dirs: list[Path] = []
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        dirs.append(Path(meipass))
-    pkg = Path(__file__).resolve().parent
-    dirs.append(pkg)
-    dirs.append(pkg.parent)  # 项目根目录（源码运行时 icon 在这里）
-    dirs.append(Path(sys.executable).resolve().parent)
-    return dirs
-
-
-def make_app_icon() -> QIcon:
-    """程序图标：icon.ico / icon.png（黑底已抠透明）。"""
-    for d in _icon_search_dirs():
-        for name in ("icon.ico", "icon.png"):
-            p = d / name
-            if p.is_file():
-                return QIcon(str(p))
-    return QIcon()
 
 
 class JointSlider(QWidget):
@@ -141,6 +118,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.resize(1000, 800)
+        self.setAcceptDrops(True)  # 整个窗口（含菜单栏、状态栏、左栏）都能拖入 URDF，转交给视口处理
 
         self._urdf: Optional[Path] = None
         self._built: Optional[BuiltModel] = None
@@ -175,6 +153,13 @@ class MainWindow(QMainWindow):
         self.viewport.shutdown()
         self.stl_preview.shutdown()
         super().closeEvent(ev)
+
+    # 拖放：视口自己能接；落在窗口其它位置的由这里转交给视口（判断 .urdf、发 urdfDropped）
+    def dragEnterEvent(self, ev) -> None:
+        self.viewport.dragEnterEvent(ev)
+
+    def dropEvent(self, ev) -> None:
+        self.viewport.dropEvent(ev)
 
     def _build_menu(self) -> None:
         self.menu_file = self.menuBar().addMenu("")
@@ -219,29 +204,38 @@ class MainWindow(QMainWindow):
         self.menu_help = self.menuBar().addMenu("")
         self.act_repo = QAction(self)
         self.act_repo.triggered.connect(lambda: self._open_url(REPO_HOME))
-        self.act_video = QAction(self)
-        self.act_video.triggered.connect(lambda: self._open_url(VIDEO_TUTORIAL))
+        self.menu_help.addAction(self.act_repo)
+        self.act_video: Optional[QAction] = None
+        if VIDEO_TUTORIAL:
+            self.act_video = QAction(self)
+            self.act_video.triggered.connect(lambda: self._open_url(VIDEO_TUTORIAL))
+            self.menu_help.addAction(self.act_video)
+        self.menu_help.addSeparator()
         self.act_changelog = QAction(self)
         self.act_changelog.triggered.connect(self._show_changelog)
         self.act_check_update = QAction(self)
         self.act_check_update.triggered.connect(self._show_update_check)
-        self.menu_help.addAction(self.act_repo)
-        self.menu_help.addAction(self.act_video)
-        self.menu_help.addSeparator()
+        self.act_open_log_dir = QAction(self)
+        self.act_open_log_dir.triggered.connect(self._open_log_dir)
         self.menu_help.addAction(self.act_changelog)
         self.menu_help.addAction(self.act_check_update)
+        self.menu_help.addAction(self.act_open_log_dir)
 
     @staticmethod
     def _open_url(url: str) -> None:
         ok = QDesktopServices.openUrl(QUrl(url))
-        logger.info("打开链接: {} -> {}", url, "ok" if ok else "失败")
+        logger.info("open url: {} -> {}", url, "ok" if ok else "failed")
+
+    def _open_log_dir(self) -> None:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        self._open_url(QUrl.fromLocalFile(str(LOG_DIR)).toString())
 
     def _show_changelog(self) -> None:
-        logger.info("打开「版本介绍」")
+        logger.info("open changelog dialog")
         ChangelogDialog(self).exec()
 
     def _show_update_check(self) -> None:
-        logger.info("菜单触发「检查更新」")
+        logger.info("update check triggered from menu")
         UpdateCheckDialog(self).exec()
 
     def retranslate(self) -> None:
@@ -258,9 +252,11 @@ class MainWindow(QMainWindow):
             act.setChecked(act.data() == i18n.lang)
         self.menu_help.setTitle(tr("menu.help"))
         self.act_repo.setText(tr("menu.repo"))
-        self.act_video.setText(tr("menu.video"))
+        if self.act_video is not None:
+            self.act_video.setText(tr("menu.video"))
         self.act_changelog.setText(tr("menu.changelog"))
         self.act_check_update.setText(tr("menu.check_update"))
+        self.act_open_log_dir.setText(tr("menu.open_log_dir"))
 
         self.opts_box.setTitle(tr("opts.box"))
         self.chk_collision.setText(tr("opts.collision"))
@@ -462,15 +458,15 @@ class MainWindow(QMainWindow):
     def load_urdf(self, path: str) -> None:
         urdf = Path(path)
         if not urdf.is_file():
-            logger.warning("文件不存在: {}", path)
+            logger.warning("file not found: {}", path)
             QMessageBox.warning(self, tr("dialog.no_file"), path)
             return
-        logger.info("加载 URDF: {}", urdf)
+        logger.info("loading URDF: {}", urdf)
         self._opts = self._collect_opts()
         try:
             built = build_model(urdf, self._opts)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("加载失败: {}", urdf)
+            logger.exception("load failed: {}", urdf)
             QMessageBox.critical(self, tr("dialog.load_fail"), str(exc))
             return
         self._urdf = urdf
@@ -480,7 +476,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             tr("status.loaded", name=urdf.name, n=len(built.joints))
         )
-        logger.info("加载完成: {} 可控关节, {} geom", len(built.joints), len(built.geoms))
+        logger.info("loaded: {} controllable joints, {} geoms", len(built.joints), len(built.geoms))
 
     def _snapshot_joints(self) -> Dict[str, float]:
         return {name: sl.value() for name, sl in self._sliders.items()}

@@ -22,6 +22,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from .i18n import i18n, tr
+from .log import logger
 
 
 def release_qt_gl_context() -> None:
@@ -147,6 +148,7 @@ class Viewport(QWidget):
         release_qt_gl_context()
         self._w, self._h = w, h
         self._dirty = True
+        logger.debug("viewport renderer created {}x{}", w, h)
 
     def _tick(self) -> None:
         if self.model is None or self.data is None or not self.isVisible():
@@ -173,6 +175,7 @@ class Viewport(QWidget):
         except Exception as exc:  # noqa: BLE001
             # 不直接丢模型：先重建渲染器重试几次，仍失败才放弃
             self._render_failures += 1
+            logger.warning("viewport render failed ({}/3): {!r}", self._render_failures, exc)
             close_renderer(self.renderer)
             self.renderer = None
             if self._render_failures >= 3:

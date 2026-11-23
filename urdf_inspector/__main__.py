@@ -1,4 +1,7 @@
-"""入口：python -m urdf_inspector [urdf]"""
+"""入口：python -m urdf_inspector [urdf]
+
+顺序固定：先初始化日志，再 import mujoco / Qt 与业务模块，最后建 QApplication 和主窗口。
+"""
 
 from __future__ import annotations
 
@@ -13,14 +16,14 @@ def main(argv: list[str] | None = None) -> int:
 
     log_file = setup_logging()
 
-    # 先 mujoco 再 Qt（Windows DLL 顺序）
-    import mujoco  # noqa: F401
-    from PySide6 import QtCore
-    from PySide6.QtWidgets import QApplication
+    # 先 mujoco 再 Qt（Windows 原生 DLL 加载顺序）
+    import mujoco
+    from PySide6 import QtCore, QtGui, QtWidgets
 
-    from . import __version__
+    from . import APP_NAME, ORG, __version__
     from .i18n import i18n
-    from .main_window import MainWindow, make_app_icon
+    from .icons import app_icon
+    from .main_window import MainWindow
 
     parser = argparse.ArgumentParser(description="urdf inspector (MuJoCo off-screen + Qt)")
     parser.add_argument("urdf", nargs="?", help="可选：启动时加载的 .urdf 路径")
@@ -28,37 +31,42 @@ def main(argv: list[str] | None = None) -> int:
 
     logger.info("=" * 60)
     logger.info(
-        "urdf-inspector v{} 启动 | python {} | PySide6 {} | mujoco {} | {} | frozen={}",
-        __version__, platform.python_version(), QtCore.__version__, mujoco.__version__,
+        "{} v{} starting | python {} | PySide6 {} | mujoco {} | {} | frozen={}",
+        APP_NAME, __version__, platform.python_version(), QtCore.__version__, mujoco.__version__,
         platform.platform(), bool(getattr(sys, "frozen", False)),
     )
-    logger.info("日志文件: {}", log_file)
+    logger.info("log file: {}", log_file)
     logger.debug("argv: {}", sys.argv[1:] if argv is None else argv)
 
+    # Windows：不用 Python 默认 AppID，任务栏才会显示本程序图标而不是 python.exe
     if sys.platform == "win32":
         try:
             import ctypes
 
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "com.ccbs.urdf_inspector"
-            )
-        except Exception:  # noqa: BLE001
-            pass
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(f"{ORG}.{APP_NAME}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("SetCurrentProcessExplicitAppUserModelID failed: {}", e)
 
-    app = QApplication(sys.argv)
-    app.setOrganizationName("CCBS")
-    app.setApplicationName("urdf inspector")
-    icon = make_app_icon()
+    # 本工具不用 QOpenGLWidget（MuJoCo 离屏渲染后用 QPainter 贴图），所以不设置 QSurfaceFormat
+
+    app = QtWidgets.QApplication(sys.argv)
+    app.setOrganizationName(ORG)
+    app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(__version__)
+    app.setStyle("Fusion")
+    app.setFont(QtGui.QFont("Microsoft YaHei UI", 9))
+    i18n.load()                      # 读取上次选的语言（首次跟随系统），需在 QApplication 之后
+    icon = app_icon()
     app.setWindowIcon(icon)
-    i18n.load()  # 读取上次选的语言（首次默认英文）
+
     win = MainWindow()
     win.setWindowIcon(icon)
     win.show()
     if args.urdf:
-        logger.info("命令行指定启动文件: {}", args.urdf)
+        logger.info("initial file from argv: {}", args.urdf)
         win.load_urdf(args.urdf)
     code = app.exec()
-    logger.info("程序退出 code={}", code)
+    logger.info("exit code={}", code)
     return code
 
 
