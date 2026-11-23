@@ -13,7 +13,7 @@ visual/collision 可在仿真中高亮并预览对应 STL，拖动关节滑条�
 
 https://private-user-images.githubusercontent.com/34444109/694283238-976c9b32-3dbb-42fb-b1d3-9996dcee1c40.mp4
 
-依赖：mujoco、numpy、PySide6。
+依赖：mujoco、numpy、PySide6、loguru。开源仓库：[ccbs-tools/urdf-inspector](https://github.com/ccbs-tools/urdf-inspector)。
 
 ## 安装
 
@@ -51,13 +51,17 @@ uv run pyinstaller urdf_inspector.spec --noconfirm
 
 ```
 urdf_inspector/
-  __main__.py     入口 main()
-  main_window.py  主窗口：显示选项 / 连杆几何树 / 关节控制
-  viewport.py     MuJoCo URDF 仿真视口
-  stl_view.py     STL 预览（离屏渲染）
-  model.py        URDF → MuJoCo 模型构建、显示选项
-  meshio.py       网格读取（STL / DAE …）
-  i18n.py         多语言字符串与运行时切换
-run.py            PyInstaller 入口
+  __main__.py        入口 main()
+  main_window.py     主窗口：显示选项 / 连杆几何树 / 关节控制 / 帮助菜单
+  viewport.py        MuJoCo URDF 仿真视口
+  stl_view.py        STL 预览（离屏渲染）
+  model.py           URDF → MuJoCo 模型构建、显示选项
+  meshio.py          网格读取（STL / DAE …）
+  i18n.py            多语言字符串与运行时切换
+  log.py             loguru 日志（~/.ccbs/urdf-inspector/）
+  changelog.py       版本历史与检查更新
+  version_dialogs.py 版本介绍 / 检查更新对话框
+run.py               PyInstaller 入口
 urdf_inspector.spec  PyInstaller 配置
+.github/workflows/build.yml  Windows 打包与 Release
 ```

@@ -12,7 +12,7 @@ a = Analysis(
     ["run.py"],
     pathex=[],
     binaries=mj_binaries + glfw_binaries,
-    datas=mj_datas + glfw_datas,
+    datas=mj_datas + glfw_datas + [("icon.ico", "."), ("icon.png", ".")],
     hiddenimports=mj_hidden + glfw_hidden + ["urdf_inspector"],
     hookspath=[],
     hooksconfig={},
@@ -71,6 +71,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon="icon.ico",
 )
 
 coll = COLLECT(

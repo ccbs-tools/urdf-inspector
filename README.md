@@ -15,7 +15,8 @@ Chinese at runtime.
 
 https://private-user-images.githubusercontent.com/34444109/694283238-976c9b32-3dbb-42fb-b1d3-9996dcee1c40.mp4
 
-Dependencies: mujoco, numpy, PySide6.
+Dependencies: mujoco, numpy, PySide6, loguru.
+Open-source repo: [ccbs-tools/urdf-inspector](https://github.com/ccbs-tools/urdf-inspector).
 
 ## Install
 
@@ -54,13 +55,17 @@ uv run pyinstaller urdf_inspector.spec --noconfirm
 
 ```
 urdf_inspector/
-  __main__.py     entry point main()
-  main_window.py  main window: options / geometry tree / joint control
-  viewport.py     MuJoCo URDF simulation viewport
-  stl_view.py     STL preview (off-screen render)
-  model.py        URDF → MuJoCo model build, view options
-  meshio.py       mesh loading (STL / DAE …)
-  i18n.py         language strings and runtime switching
-run.py            PyInstaller entry
+  __main__.py        entry point main()
+  main_window.py     main window: options / geometry tree / joints / help menu
+  viewport.py        MuJoCo URDF simulation viewport
+  stl_view.py        STL preview (off-screen render)
+  model.py           URDF → MuJoCo model build, view options
+  meshio.py          mesh loading (STL / DAE …)
+  i18n.py            language strings and runtime switching
+  log.py             loguru logging (~/.ccbs/urdf-inspector/)
+  changelog.py       version history & update check
+  version_dialogs.py version info / update-check dialogs
+run.py               PyInstaller entry
 urdf_inspector.spec  PyInstaller config
+.github/workflows/build.yml  Windows packaging & Release
 ```

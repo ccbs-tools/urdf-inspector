@@ -21,6 +21,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
+from .i18n import i18n, tr
+
 
 def release_qt_gl_context() -> None:
     """MuJoCo 渲染会把自己的 GLFW 上下文设为当前；Qt 仍以为自己的上下文是当前的，
@@ -71,8 +73,8 @@ class Viewport(QWidget):
         self.renderer = None
         self.cam: Optional[mujoco.MjvCamera] = None
         self.opt: Optional[mujoco.MjvOption] = None
-        self.error = "把 .urdf 文件拖到这里，或用菜单 / 打开"
-        self.hint = "左键旋转  右键平移  滚轮缩放  双击复位"
+        # None → 用当前语言的默认"拖入 URDF"提示；"" → 不显示；其它 → 具体错误文本
+        self.error: Optional[str] = None
         self._img: Optional[QImage] = None
         self._buf: Optional[np.ndarray] = None
         self._dirty = True
@@ -85,6 +87,7 @@ class Viewport(QWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(int(1000 / self.FPS))
+        i18n.languageChanged.connect(self.update)  # 切换语言后重绘提示文字
 
     def set_model(self, model: mujoco.MjModel, data: mujoco.MjData, *, physics: bool = False) -> None:
         close_renderer(self.renderer)
@@ -108,7 +111,7 @@ class Viewport(QWidget):
         self.renderer = None
         self.cam = None
         self._img = None
-        self.error = message or "把 .urdf 文件拖到这里"
+        self.error = message or None
         self.update()
 
     def mark_dirty(self) -> None:
@@ -149,7 +152,11 @@ class Viewport(QWidget):
         if self.model is None or self.data is None or not self.isVisible():
             return
         if self._step_physics:
-            mujoco.mj_step(self.model, self.data)
+            # 每帧只 step 一次 ≈ 实时的 timestep*FPS ≈ 1/16；按墙钟追赶 1/FPS 秒仿真时间
+            n = max(1, int(round((1.0 / self.FPS) / max(self.model.opt.timestep, 1e-6))))
+            n = min(n, 100)  # 防止 timestep 极小时一帧卡死
+            for _ in range(n):
+                mujoco.mj_step(self.model, self.data)
             self._dirty = True
         if not self._dirty:
             return
@@ -169,7 +176,7 @@ class Viewport(QWidget):
             close_renderer(self.renderer)
             self.renderer = None
             if self._render_failures >= 3:
-                self.error = f"渲染出错：{exc}"
+                self.error = tr("view.render_err", err=exc)
                 self.model = None
             else:
                 self._dirty = True
@@ -184,16 +191,18 @@ class Viewport(QWidget):
         p.fillRect(self.rect(), QColor("#1e1e1e"))
         if self._img is not None and self.model is not None:
             p.drawImage(self.rect(), self._img)
-        if self.error:
+        error = tr("view.drop_hint") if self.error is None else self.error
+        if error:
             p.setPen(QPen(QColor("#ffb74d")))
             p.drawText(
                 self.rect().adjusted(16, 16, -16, -16),
                 Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
-                self.error,
+                error,
             )
         # 左下角操作提示：半透明底色，浅色地面上也能看清
+        hint = tr("view.hint")
         fm = p.fontMetrics()
-        tw = fm.horizontalAdvance(self.hint)
+        tw = fm.horizontalAdvance(hint)
         th = fm.height()
         bg = self.rect().adjusted(6, 0, 0, -6)
         bg.setTop(bg.bottom() - th - 6)
@@ -202,7 +211,7 @@ class Viewport(QWidget):
         p.setBrush(QColor(0, 0, 0, 120))
         p.drawRoundedRect(bg, 4, 4)
         p.setPen(QPen(QColor("#e0e0e0")))
-        p.drawText(bg, Qt.AlignmentFlag.AlignCenter, self.hint)
+        p.drawText(bg, Qt.AlignmentFlag.AlignCenter, hint)
         p.end()
 
     def _camera_basis(self):

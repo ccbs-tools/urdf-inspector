@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import math
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 import mujoco
 import numpy as np
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QKeySequence
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
@@ -31,9 +32,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .changelog import REPO_HOME, VIDEO_TUTORIAL
 from .i18n import LANGUAGES, i18n, tr
+from .log import logger
 from .model import BuiltModel, GeomInfo, ViewOptions, build_model
 from .stl_view import StlPreview
+from .version_dialogs import ChangelogDialog, UpdateCheckDialog
 from .viewport import Viewport
 
 HL_VISUAL = np.array([0.15, 0.85, 1.0, 1.0], dtype=np.float64)
@@ -41,6 +45,28 @@ HL_COLLISION = np.array([1.0, 0.45, 0.08, 1.0], dtype=np.float64)
 DIM_ALPHA = 0.12
 ROLE_GEOM_ID = Qt.ItemDataRole.UserRole
 ROLE_KIND = Qt.ItemDataRole.UserRole + 1
+
+
+def _icon_search_dirs() -> list[Path]:
+    dirs: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        dirs.append(Path(meipass))
+    pkg = Path(__file__).resolve().parent
+    dirs.append(pkg)
+    dirs.append(pkg.parent)  # 项目根目录（源码运行时 icon 在这里）
+    dirs.append(Path(sys.executable).resolve().parent)
+    return dirs
+
+
+def make_app_icon() -> QIcon:
+    """程序图标：icon.ico / icon.png（黑底已抠透明）。"""
+    for d in _icon_search_dirs():
+        for name in ("icon.ico", "icon.png"):
+            p = d / name
+            if p.is_file():
+                return QIcon(str(p))
+    return QIcon()
 
 
 class JointSlider(QWidget):
@@ -120,7 +146,7 @@ class MainWindow(QMainWindow):
         self._built: Optional[BuiltModel] = None
         self._opts = ViewOptions()
         self._sliders: Dict[str, JointSlider] = {}
-        self._physics = True
+        self._physics = False
         self._highlight_ids: Set[int] = set()
         self._geom_by_id: Dict[int, GeomInfo] = {}
         self._stl_loaded: Optional[Path] = None
@@ -190,6 +216,34 @@ class MainWindow(QMainWindow):
             self.lang_group.addAction(act)
             self.menu_lang.addAction(act)
 
+        self.menu_help = self.menuBar().addMenu("")
+        self.act_repo = QAction(self)
+        self.act_repo.triggered.connect(lambda: self._open_url(REPO_HOME))
+        self.act_video = QAction(self)
+        self.act_video.triggered.connect(lambda: self._open_url(VIDEO_TUTORIAL))
+        self.act_changelog = QAction(self)
+        self.act_changelog.triggered.connect(self._show_changelog)
+        self.act_check_update = QAction(self)
+        self.act_check_update.triggered.connect(self._show_update_check)
+        self.menu_help.addAction(self.act_repo)
+        self.menu_help.addAction(self.act_video)
+        self.menu_help.addSeparator()
+        self.menu_help.addAction(self.act_changelog)
+        self.menu_help.addAction(self.act_check_update)
+
+    @staticmethod
+    def _open_url(url: str) -> None:
+        ok = QDesktopServices.openUrl(QUrl(url))
+        logger.info("打开链接: {} -> {}", url, "ok" if ok else "失败")
+
+    def _show_changelog(self) -> None:
+        logger.info("打开「版本介绍」")
+        ChangelogDialog(self).exec()
+
+    def _show_update_check(self) -> None:
+        logger.info("菜单触发「检查更新」")
+        UpdateCheckDialog(self).exec()
+
     def retranslate(self) -> None:
         self.menu_file.setTitle(tr("menu.file"))
         self.act_open.setText(tr("menu.open"))
@@ -202,6 +256,11 @@ class MainWindow(QMainWindow):
         self.menu_lang.setTitle(tr("menu.language"))
         for act in self.lang_group.actions():
             act.setChecked(act.data() == i18n.lang)
+        self.menu_help.setTitle(tr("menu.help"))
+        self.act_repo.setText(tr("menu.repo"))
+        self.act_video.setText(tr("menu.video"))
+        self.act_changelog.setText(tr("menu.changelog"))
+        self.act_check_update.setText(tr("menu.check_update"))
 
         self.opts_box.setTitle(tr("opts.box"))
         self.chk_collision.setText(tr("opts.collision"))
@@ -254,7 +313,7 @@ class MainWindow(QMainWindow):
         self.chk_world = QCheckBox()
         self.chk_world.setChecked(True)
         self.chk_physics = QCheckBox()
-        self.chk_physics.setChecked(True)
+        self.chk_physics.setChecked(False)
 
         for w in (
             self.chk_collision,
@@ -403,12 +462,15 @@ class MainWindow(QMainWindow):
     def load_urdf(self, path: str) -> None:
         urdf = Path(path)
         if not urdf.is_file():
+            logger.warning("文件不存在: {}", path)
             QMessageBox.warning(self, tr("dialog.no_file"), path)
             return
+        logger.info("加载 URDF: {}", urdf)
         self._opts = self._collect_opts()
         try:
             built = build_model(urdf, self._opts)
         except Exception as exc:  # noqa: BLE001
+            logger.exception("加载失败: {}", urdf)
             QMessageBox.critical(self, tr("dialog.load_fail"), str(exc))
             return
         self._urdf = urdf
@@ -418,6 +480,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             tr("status.loaded", name=urdf.name, n=len(built.joints))
         )
+        logger.info("加载完成: {} 可控关节, {} geom", len(built.joints), len(built.geoms))
 
     def _snapshot_joints(self) -> Dict[str, float]:
         return {name: sl.value() for name, sl in self._sliders.items()}
@@ -614,6 +677,32 @@ class MainWindow(QMainWindow):
         n = len(self._highlight_ids)
         self.statusBar().showMessage(tr("status.highlight", n=n))
 
+    def _apply_mimics(self, masters: dict[str, float] | None = None) -> None:
+        """按 URDF <mimic> 同步从动关节 qpos。
+
+        关物理时 mj_forward 不会解 equality 约束，必须手写；开物理时由求解器处理，
+        这里再写一遍也无害，可保证首帧/复位立刻对齐。
+        """
+        if self._built is None:
+            return
+        data = self._built.data
+        by_name = {j.name: j for j in self._built.all_joints}
+        if masters is None:
+            masters = {
+                j.name: float(data.qpos[j.qposadr])
+                for j in self._built.joints
+            }
+        for info in self._built.all_joints:
+            if not info.mimic_of:
+                continue
+            master = by_name.get(info.mimic_of)
+            if master is None:
+                continue
+            q_m = masters.get(info.mimic_of, float(data.qpos[master.qposadr]))
+            q = info.mimic_offset + info.mimic_mult * q_m
+            lo, hi = info.range
+            data.qpos[info.qposadr] = min(max(q, lo), hi)
+
     def _write_ctrl(self, name: str, value: float) -> None:
         if self._built is None:
             return
@@ -626,6 +715,7 @@ class MainWindow(QMainWindow):
                 if info.name == name:
                     data.qpos[info.qposadr] = value
                     break
+            self._apply_mimics({name: value})
             mujoco.mj_forward(model, data)
         self.viewport.mark_dirty()
 
@@ -648,5 +738,6 @@ class MainWindow(QMainWindow):
             aid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, info.name)
             if aid >= 0:
                 data.ctrl[aid] = q
+        self._apply_mimics()
         mujoco.mj_forward(model, data)
         self.viewport.mark_dirty()

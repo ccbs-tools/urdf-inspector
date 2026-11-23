@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from PySide6 import QtCore
 
+from .log import logger
+
 DEFAULT_LANG = "en"
 LANGUAGES = (("en", "English"), ("zh", "中文（简体）"))
 _SETTINGS_KEY = "language"
@@ -28,6 +30,24 @@ _STRINGS: dict[str, dict[str, str]] = {
         "menu.reset_stl_cam": "Reset STL camera",
         "menu.home_joints": "Home joints",
         "menu.language": "&Language",
+        "menu.help": "&Help",
+        "menu.repo": "&Repository Homepage",
+        "menu.video": "&Video Tutorial",
+        "menu.changelog": "Version &Info",
+        "menu.check_update": "Check for &Updates",
+        "chg.title": "Version info  (current v{ver})",
+        "chg.check": "Check for updates",
+        "chg.close": "Close",
+        "upd.title": "Check for updates",
+        "upd.checking": "Checking for updates…",
+        "upd.countdown": "{sec} s",
+        "upd.cancel": "Cancel",
+        "upd.close": "Close",
+        "upd.download": "Download",
+        "upd.latest": "You are on the latest version (v{cur}).",
+        "upd.newer": "New version v{latest} available (current v{cur}).",
+        "upd.failed_short": "Check failed. Please check your network and try again.",
+        "upd.timeout": "No response within {sec} s. Check your network and try again.",
         "status.drop_hint": "Drop a .urdf, or File → Open",
         "status.loaded": "Loaded {name}  ·  {n} controllable joints",
         "status.highlight": "Highlighted {n} geoms (Ctrl/Shift to multi-select)",
@@ -63,6 +83,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "stl.render_err": "STL preview render error: {err}",
         "stl.tips": "LMB rotate  RMB pan  Wheel zoom  Double-click/R reset  "
         "F fit  W wireframe  G grid  A axes    grid {step}",
+        "view.drop_hint": "Drop a .urdf file here, or use File → Open",
+        "view.hint": "LMB rotate  RMB pan  Wheel zoom  Double-click reset",
+        "view.render_err": "Render error: {err}",
     },
     "zh": {
         "app.title": "urdf inspector",
@@ -75,6 +98,24 @@ _STRINGS: dict[str, dict[str, str]] = {
         "menu.reset_stl_cam": "复位 STL 相机",
         "menu.home_joints": "复位关节 (Home)",
         "menu.language": "语言(&L)",
+        "menu.help": "帮助(&H)",
+        "menu.repo": "仓库主页(&R)",
+        "menu.video": "视频教程(&V)",
+        "menu.changelog": "版本介绍(&I)",
+        "menu.check_update": "检查更新(&U)",
+        "chg.title": "版本介绍（当前 v{ver}）",
+        "chg.check": "检查版本更新",
+        "chg.close": "关闭",
+        "upd.title": "检查版本更新",
+        "upd.checking": "正在检查更新…",
+        "upd.countdown": "{sec} 秒",
+        "upd.cancel": "取消",
+        "upd.close": "关闭",
+        "upd.download": "下载",
+        "upd.latest": "已是最新版本（v{cur}）。",
+        "upd.newer": "发现新版本 v{latest}（当前 v{cur}）。",
+        "upd.failed_short": "检查失败，请检查网络后重试。",
+        "upd.timeout": "{sec} 秒内没有响应，请检查网络后重试。",
         "status.drop_hint": "拖入 .urdf，或 文件 → 打开",
         "status.loaded": "已加载 {name}  ·  {n} 可控关节",
         "status.highlight": "高亮 {n} 个几何体（Ctrl/Shift 多选）",
@@ -110,6 +151,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "stl.render_err": "STL 预览渲染出错：{err}",
         "stl.tips": "左键旋转  右键平移  滚轮缩放  双击/R 复位  "
         "F 适配  W 线框  G 网格  A 坐标轴    网格 {step}",
+        "view.drop_hint": "把 .urdf 文件拖到这里，或用菜单 文件 → 打开",
+        "view.hint": "左键旋转  右键平移  滚轮缩放  双击复位",
+        "view.render_err": "渲染出错：{err}",
     },
 }
 
@@ -129,11 +173,13 @@ class _I18n(QtCore.QObject):
         """从 QSettings 读取上次选择的语言；需在 QApplication 创建后调用。"""
         saved = QtCore.QSettings().value(_SETTINGS_KEY, DEFAULT_LANG)
         self._lang = saved if saved in _STRINGS else DEFAULT_LANG
+        logger.info("语言: {} (设置中保存的值={!r})", self._lang, saved)
         return self._lang
 
     def set(self, lang: str) -> None:
         if lang not in _STRINGS or lang == self._lang:
             return
+        logger.info("切换语言 {} -> {}", self._lang, lang)
         self._lang = lang
         QtCore.QSettings().setValue(_SETTINGS_KEY, lang)
         self.languageChanged.emit(lang)

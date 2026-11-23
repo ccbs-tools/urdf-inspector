@@ -26,6 +26,26 @@ def _dedup(tri_verts: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return uniq, faces
 
 
+def orient_faces_outward(
+    verts: np.ndarray, faces: np.ndarray
+) -> Tuple[np.ndarray, bool]:
+    """若有向体积为负（整体绕序朝内），则翻转所有三角形索引。
+
+    MuJoCo 背面剔除按右手定则；CAD 导出的 STL 常把法线弄反，这里用
+    Σ det(v0,v1,v2) 判断整体朝向。开放网格也能用这个粗判。
+    返回 (faces, flipped)。
+    """
+    if faces.size == 0:
+        return faces, False
+    faces = np.asarray(faces, dtype=np.int32)
+    tri = np.asarray(verts, dtype=np.float64)[faces]
+    # 6V = Σ ⟨v0×v1, v2⟩；V<0 表示绕序朝内
+    signed = float(np.einsum("ij,ij->i", np.cross(tri[:, 0], tri[:, 1]), tri[:, 2]).sum())
+    if signed >= 0.0:
+        return faces, False
+    return np.ascontiguousarray(faces[:, ::-1]), True
+
+
 def load_stl(path: Path) -> Tuple[np.ndarray, np.ndarray]:
     data = path.read_bytes()
     if len(data) >= 84:
@@ -252,15 +272,21 @@ def load_dae(path: Path) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def load_mesh(path: Path) -> Tuple[np.ndarray, np.ndarray]:
-    """返回 (verts (N,3) float64, faces (M,3) int32)。不支持的格式抛 ValueError。"""
+    """返回 (verts (N,3) float64, faces (M,3) int32)。不支持的格式抛 ValueError。
+
+    加载后若整体绕序朝内，会自动翻转面索引，避免 MuJoCo 背面剔除把外表面剔掉。
+    """
     suffix = path.suffix.lower()
     if suffix == ".stl":
-        return load_stl(path)
-    if suffix == ".obj":
-        return load_obj(path)
-    if suffix == ".dae":
-        return load_dae(path)
-    raise ValueError(f"不支持的网格格式：{suffix}")
+        verts, faces = load_stl(path)
+    elif suffix == ".obj":
+        verts, faces = load_obj(path)
+    elif suffix == ".dae":
+        verts, faces = load_dae(path)
+    else:
+        raise ValueError(f"不支持的网格格式：{suffix}")
+    faces, _ = orient_faces_outward(verts, faces)
+    return verts, faces
 
 
 def resolve_mesh_path(file: str, search_dirs: Iterable[Path]) -> Optional[Path]:
