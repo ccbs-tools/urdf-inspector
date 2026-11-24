@@ -9,7 +9,7 @@ Python 版本由 `.python-version` 固定为 3.12（本地和 CI 的 `uv sync` �
 
 ```powershell
 uv sync --group dev                        # 安装运行依赖 + pyinstaller
-uv run python -m urdf_inspector [urdf]     # 源码运行
+uv run python -m urdf_inspector [file]     # 源码运行；file 可以是 URDF 或 MJCF
 uv run pyinstaller main.spec --noconfirm   # 本地打包 → dist\urdf-inspector\urdf-inspector.exe
 ```
 
@@ -35,9 +35,9 @@ urdf_inspector/
   version_dialogs.py         版本介绍 / 检查更新对话框
   icons.py                   应用图标
   main_window.py             主窗口：菜单栏、显示选项 / 连杆几何树 / 关节滑条
-  viewport.py                MuJoCo URDF 仿真视口（离屏渲染 + QPainter 贴图、拖放）
+  viewport.py                MuJoCo 仿真视口，URDF / MJCF 共用（离屏渲染 + QPainter 贴图、拖放）
   stl_view.py                STL 预览（离屏渲染）
-  model.py                   URDF → MuJoCo 模型构建、显示选项
+  model.py                   URDF / MJCF → MuJoCo 模型构建、显示选项（MJCF 只看不动）
   meshio.py                  纯 Python 读网格（STL / OBJ / DAE），绕开 MuJoCo 的非 ASCII 路径问题
 assets/                      icon.ico / icon.png 与 README 截图
 README.md / README.zh.md     面向用户的说明（英文 / 中文）

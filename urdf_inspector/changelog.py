@@ -50,6 +50,8 @@ RELEASES: tuple[dict, ...] = (
                 "拖入 URDF 查看（MuJoCo 离屏渲染），点选连杆几何高亮并预览 STL。",
                 "关节滑条控制；开关碰撞体 / 坐标系 / 质心 / 物理步进。",
                 "支持 URDF <mimic> 从动关节；菜单栏中英文切换。",
+                "可拖入 MuJoCo MJCF（.xml）以只看模式打开：模型原样加载，可转相机、点选高亮、预览网格；"
+                "不提供关节滑条和物理步进。",
                 "帮助菜单：仓库主页、版本介绍、检查更新；GitHub Actions 自动打包发布。",
             ],
             "en": [
@@ -57,6 +59,8 @@ RELEASES: tuple[dict, ...] = (
                 "Drop a URDF to inspect it (MuJoCo off-screen); pick link geometry to highlight and preview STL.",
                 "Joint sliders; toggle collision / frames / CoM / physics stepping.",
                 "URDF <mimic> joints are followed; menu language switch (EN/ZH).",
+                "MuJoCo MJCF (.xml) files can be dropped and open view-only: loaded as-is, with camera, "
+                "highlighting and mesh preview; no joint sliders or physics stepping.",
                 "Help menu: repo home, version info, check for updates; GitHub Actions packaging & releases.",
             ],
         },

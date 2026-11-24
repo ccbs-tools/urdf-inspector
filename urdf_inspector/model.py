@@ -1,4 +1,12 @@
-"""URDF → MuJoCo 模型（选项开关对应 mujoco_view.py 的可选项）。"""
+"""URDF / MJCF → MuJoCo 模型（选项开关对应 mujoco_view.py 的可选项）。
+
+入口是 build_model()，按 XML 根标签分两条路：
+
+- URDF（<robot>）：按本工具的约定重建——统一碰撞位、给每个关节加位置伺服、覆盖阻尼等，
+  可拖关节、可开物理。
+- MJCF（<mujoco>）：只看不动——原样加载，不改碰撞位 / 执行器 / 阻尼 / 关键帧，
+  只加不影响物理的显示内容（地面、灯光、坐标系标记），不提供关节滑条和物理步进。
+"""
 
 from __future__ import annotations
 
@@ -35,6 +43,21 @@ FRAME_AXES = (
 DEFAULT_KP = 200.0
 DEFAULT_KV_RATIO = 0.1
 
+# MJCF 的离屏帧缓冲至少要这么大：视口按控件尺寸渲染，上限 1920×1200（见 viewport.py）
+MJCF_OFF_W = 1920
+MJCF_OFF_H = 1200
+
+
+class ModelFormatError(ValueError):
+    """文件不是能单独加载的 URDF / MJCF。
+
+    code 对应界面文案键 `dialog.err_<code>`，params 是该文案的占位参数。"""
+
+    def __init__(self, code: str, **params: str) -> None:
+        super().__init__(f"{code} {params}" if params else code)
+        self.code = code
+        self.params = params
+
 
 @dataclass
 class ViewOptions:
@@ -70,6 +93,7 @@ class GeomInfo:
     label: str          # 树上显示用
     mesh: str = ""
     mesh_path: Optional[Path] = None  # URDF 里的网格绝对路径（若有）
+    mesh_id: int = -1   # 仅 MJCF：编译后模型里的网格 id，STL 预览用 mesh_arrays() 直接取数据
 
 
 @dataclass
@@ -79,21 +103,41 @@ class BuiltModel:
     joints: List[JointInfo] = field(default_factory=list)  # 可控制（不含 mimic 从动）
     all_joints: List[JointInfo] = field(default_factory=list)
     geoms: List[GeomInfo] = field(default_factory=list)
-    urdf: Path = Path()
+    path: Path = Path()
+    kind: str = "urdf"  # urdf | mjcf（mjcf 只看不动：joints 为空，不步进物理）
     # 编译刚完成时的外观快照，高亮可恢复
     rgba_base: Optional[np.ndarray] = None
     group_base: Optional[np.ndarray] = None
 
 
+def _geom_info(model: mujoco.MjModel, i: int, kind: str) -> GeomInfo:
+    name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i) or ""
+    body_id = int(model.geom_bodyid[i])
+    body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) or f"body{body_id}"
+    mesh = ""
+    mesh_id = -1
+    if int(model.geom_type[i]) == int(mujoco.mjtGeom.mjGEOM_MESH):
+        mesh_id = int(model.geom_dataid[i])
+        if mesh_id >= 0:
+            mesh = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_MESH, mesh_id) or ""
+    return GeomInfo(
+        geom_id=i,
+        body_name=body_name,
+        kind=kind,
+        name=name,
+        label=name or mesh or f"geom_{i}",
+        mesh=mesh,
+        mesh_id=mesh_id,
+    )
+
+
 def catalogue_geoms(model: mujoco.MjModel) -> List[GeomInfo]:
-    """按 body 归类 visual / collision（跳过地面等辅助 geom）。"""
+    """URDF：按 body 归类 visual / collision（跳过地面等辅助 geom）。"""
     out: List[GeomInfo] = []
     for i in range(model.ngeom):
         name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i) or ""
         if name == "floor":
             continue
-        body_id = int(model.geom_bodyid[i])
-        body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) or f"body{body_id}"
         contype = int(model.geom_contype[i])
         conaffinity = int(model.geom_conaffinity[i])
         # 我们的约定：碰撞 contype≠0；纯视觉 contype=conaffinity=0；地面等其它跳过
@@ -103,27 +147,47 @@ def catalogue_geoms(model: mujoco.MjModel) -> List[GeomInfo]:
             kind = "visual"
         else:
             continue
-
-        mesh = ""
-        if int(model.geom_type[i]) == int(mujoco.mjtGeom.mjGEOM_MESH):
-            mid = int(model.geom_dataid[i])
-            if mid >= 0:
-                mesh = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_MESH, mid) or ""
-
-        label = name or mesh or f"geom_{i}"
-        if not name and mesh:
-            label = mesh
-        out.append(
-            GeomInfo(
-                geom_id=i,
-                body_name=body_name,
-                kind=kind,
-                name=name,
-                label=label,
-                mesh=mesh,
-            )
-        )
+        info = _geom_info(model, i, kind)
+        info.mesh_id = -1  # URDF 的 STL 预览走文件路径（mesh_path）
+        out.append(info)
     return out
+
+
+def catalogue_mjcf_geoms(model: mujoco.MjModel) -> List[GeomInfo]:
+    """MJCF：按 body 归类，顺序就是模型里的顺序；平面（地面）不列。
+
+    MJCF 没有 visual / collision 标签，这里按"默认看不看得见"来分：参与碰撞且放在默认
+    不画的分组（group ≥ 3）里的算 collision，其余算 visual——包括既显示又参与碰撞的 geom。
+    """
+    out: List[GeomInfo] = []
+    for i in range(model.ngeom):
+        gtype = int(model.geom_type[i])
+        if gtype == int(mujoco.mjtGeom.mjGEOM_PLANE):
+            continue
+        collides = int(model.geom_contype[i]) != 0 or int(model.geom_conaffinity[i]) != 0
+        hidden = int(model.geom_group[i]) >= 3
+        info = _geom_info(model, i, "collision" if collides and hidden else "visual")
+        if not info.name and not info.mesh:
+            # 没名字的基本形状：用形状名代替 geom_12 这种编号，树上好认
+            shape = mujoco.mjtGeom(gtype).name.removeprefix("mjGEOM_").lower()
+            info.label = f"{shape}_{i}"
+        out.append(info)
+    return out
+
+
+def mesh_arrays(model: mujoco.MjModel, mesh_id: int) -> Tuple[np.ndarray, np.ndarray]:
+    """取编译后模型里一个网格的 (verts (N,3) float64, faces (M,3) int32)，坐标同网格文件。
+
+    编译时 MuJoCo 把顶点挪到了网格自己的惯性系（平移 mesh_pos、旋转 mesh_quat），这里还原回去，
+    所以预览里的原点就是 geom 的坐标系原点。"""
+    va, vn = int(model.mesh_vertadr[mesh_id]), int(model.mesh_vertnum[mesh_id])
+    fa, fn = int(model.mesh_faceadr[mesh_id]), int(model.mesh_facenum[mesh_id])
+    verts = np.array(model.mesh_vert[va:va + vn], dtype=np.float64)
+    faces = np.array(model.mesh_face[fa:fa + fn], dtype=np.int32)
+    rot = np.zeros(9)
+    mujoco.mju_quat2Mat(rot, model.mesh_quat[mesh_id])
+    verts = verts @ rot.reshape(3, 3).T + model.mesh_pos[mesh_id]
+    return np.ascontiguousarray(verts), faces
 
 
 @dataclass
@@ -283,15 +347,19 @@ def _set_alpha(spec: mujoco.MjSpec, alpha: float) -> None:
         g.rgba = [g.rgba[0], g.rgba[1], g.rgba[2], a]
 
 
-def _add_com_markers(spec: mujoco.MjSpec) -> None:
+def _add_com_markers(spec: mujoco.MjSpec, *, named: bool = True) -> None:
+    """named=False：标记不起名（MJCF 用，避免和模型自带的 site 重名）。下面两个函数同理。"""
     model = spec.compile()
     for b in range(1, model.nbody):
         name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, b)
+        if not name:
+            continue
         body = spec.body(name)
         if body is None or model.body_mass[b] <= 0.0:
             continue
         site = body.add_site()
-        site.name = f"com_{name}"
+        if named:
+            site.name = f"com_{name}"
         site.type = mujoco.mjtGeom.mjGEOM_SPHERE
         site.size = [0.007, 0.0, 0.0]
         site.pos = model.body_ipos[b]
@@ -299,13 +367,16 @@ def _add_com_markers(spec: mujoco.MjSpec) -> None:
         site.group = 1
 
 
-def _add_frame_markers(spec: mujoco.MjSpec, length: float = 0.06, radius: float = 0.0025) -> None:
+def _add_frame_markers(
+    spec: mujoco.MjSpec, length: float = 0.06, radius: float = 0.0025, *, named: bool = True
+) -> None:
     for body in spec.bodies:
-        if not body.name or body.name == "world":
+        if body.name == "world" or (named and not body.name):
             continue
         for axis, rgba, quat in FRAME_AXES:
             site = body.add_site()
-            site.name = f"frame_{body.name}_{axis}"
+            if named:
+                site.name = f"frame_{body.name}_{axis}"
             site.type = mujoco.mjtGeom.mjGEOM_CYLINDER
             site.size = [radius, length / 2, 0.0]
             site.pos = [
@@ -318,10 +389,13 @@ def _add_frame_markers(spec: mujoco.MjSpec, length: float = 0.06, radius: float 
             site.group = 1
 
 
-def _add_world_frame(spec: mujoco.MjSpec, length: float = 0.5, radius: float = 0.004) -> None:
+def _add_world_frame(
+    spec: mujoco.MjSpec, length: float = 0.5, radius: float = 0.004, *, named: bool = True
+) -> None:
     for axis, rgba, quat in FRAME_AXES:
         site = spec.worldbody.add_site()
-        site.name = f"world_{axis}"
+        if named:
+            site.name = f"world_{axis}"
         site.type = mujoco.mjtGeom.mjGEOM_CYLINDER
         site.size = [radius, length / 2, 0.0]
         site.pos = [
@@ -334,19 +408,158 @@ def _add_world_frame(spec: mujoco.MjSpec, length: float = 0.5, radius: float = 0
         site.group = 1
 
 
-def build_model(urdf: Path, opts: ViewOptions) -> BuiltModel:
-    urdf = urdf.resolve()
-    if not urdf.is_file():
-        raise FileNotFoundError(urdf)
+def detect_format(path: Path) -> str:
+    """按 XML 根标签判断格式：<robot> → "urdf"，<mujoco> → "mjcf"。
 
+    不看扩展名（URDF 也有用 .xml 的）。<mujocoinclude> 片段、其它根标签抛 ModelFormatError。"""
+    tag = ""
+    try:
+        with path.open("rb") as f:
+            for _, el in ET.iterparse(f, events=("start",)):
+                tag = el.tag.rsplit("}", 1)[-1]  # 去掉可能的命名空间前缀
+                break
+    except ET.ParseError as exc:
+        raise ModelFormatError("bad_xml", err=str(exc)) from exc
+    if tag == "robot":
+        return "urdf"
+    if tag == "mujoco":
+        return "mjcf"
+    if tag == "mujocoinclude":
+        raise ModelFormatError("fragment")
+    raise ModelFormatError("unknown_root", tag=tag)
+
+
+def build_model(path: Path, opts: ViewOptions) -> BuiltModel:
+    path = path.resolve()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    if detect_format(path) == "mjcf":
+        return _build_mjcf(path, opts)
+    return _build_urdf(path, opts)
+
+
+def _bake_material_rgba(model: mujoco.MjModel) -> None:
+    """把材质颜色写进 geom_rgba，渲染结果不变。
+
+    geom 用材质且自己的 rgba 是默认值时，颜色取自材质；之后只要改 geom_rgba 的任一分量
+    （调透明度、高亮时压暗），MuJoCo 就改用 geom_rgba，颜色会变成默认的灰。先写进去就不会。"""
+    default = np.array([0.5, 0.5, 0.5, 1.0], dtype=model.geom_rgba.dtype)
+    use_mat = (model.geom_matid >= 0) & (model.geom_rgba == default).all(axis=1)
+    model.geom_rgba[use_mat] = model.mat_rgba[model.geom_matid[use_mat]]
+
+
+def _build_mjcf(path: Path, opts: ViewOptions) -> BuiltModel:
+    """MJCF 只看不动：原样加载，只加不影响物理的显示内容。gravity 选项在这里不起作用。"""
+    # 用 from_file 而不是读成字符串：<include> / <model file=...> / meshdir 都相对文件所在目录
+    spec = mujoco.MjSpec.from_file(str(path))
+
+    if opts.color_joints:
+        _color_by_joint(spec)
+
+    plane = int(mujoco.mjtGeom.mjGEOM_PLANE)
+    added_floor = not any(int(g.type) == plane for g in spec.geoms)
+    if added_floor:
+        floor = spec.worldbody.add_geom()  # 不起名，避免和模型里的名字撞
+        floor.type = mujoco.mjtGeom.mjGEOM_PLANE
+        floor.size = [1.0, 1.0, 0.05]
+        floor.rgba = [0.85, 0.85, 0.85, 1.0]
+        floor.group = 2
+        floor.contype, floor.conaffinity = 0, 0
+    if not list(spec.lights):
+        # 平行光：模型大小不定，不像 URDF 那样把点光源放在固定位置
+        light = spec.worldbody.add_light()
+        light.type = mujoco.mjtLightType.mjLIGHT_DIRECTIONAL
+        light.dir = [-0.4, -0.4, -1.0]
+        light.castshadow = True
+    glob = spec.visual.global_
+    glob.offwidth = max(int(glob.offwidth), MJCF_OFF_W)
+    glob.offheight = max(int(glob.offheight), MJCF_OFF_H)
+
+    if opts.show_com:
+        _add_com_markers(spec, named=False)
+    if opts.show_frames:
+        _add_frame_markers(spec, named=False)
+    if opts.world_frame:
+        _add_world_frame(spec, named=False)
+
+    model = spec.compile()
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+
+    is_plane = model.geom_type == plane
+    if added_floor:
+        # 我们加的地面按模型范围放大（平面的显示大小在渲染时取 geom_size）
+        model.geom_size[is_plane, :2] = max(1.0, float(model.stat.extent))
+
+    _bake_material_rgba(model)
+    alpha = opts.alpha
+    if (opts.show_com or opts.show_frames) and alpha >= 0.99:
+        alpha = 0.35
+    if alpha < 0.99:
+        # 乘而不是直接设：保留模型里本来就半透明 / 全透明的 geom 的相对透明度
+        model.geom_rgba[~is_plane, 3] *= float(min(max(alpha, 0.05), 1.0))
+
+    geoms = catalogue_mjcf_geoms(model)
+    if opts.show_collision:
+        # 分组只影响显示，不影响物理
+        for g in geoms:
+            if g.kind == "collision":
+                model.geom_group[g.geom_id] = 0
+
+    return BuiltModel(
+        model=model,
+        data=data,
+        geoms=geoms,
+        path=path,
+        kind="mjcf",
+        rgba_base=np.array(model.geom_rgba, copy=True),
+        group_base=np.array(model.geom_group, copy=True),
+    )
+
+
+def _merge_compiler_tag(tag: str, attrs: Dict[str, str]) -> str:
+    """把 attrs 合并进已有的 <compiler ...> 标签（同名属性以 attrs 为准）。"""
+    existing = dict(re.findall(r'([\w:]+)="([^"]*)"', tag))
+    existing.update(attrs)
+    body = " ".join(f'{k}="{v}"' for k, v in existing.items())
+    return f"<compiler {body}/>"
+
+
+def _ensure_urdf_mujoco_compiler(xml: str, meshdir: str) -> str:
+    """保证 URDF 里有且仅有一个带 meshdir 等属性的 <mujoco><compiler/>。
+
+    文件里已有 <mujoco> 时合并进现有 <compiler>（没有则插入），避免 MuJoCo 报
+    repeated element: 'mujoco'。"""
+    attrs = {
+        "discardvisual": "false",
+        "meshdir": meshdir,
+        "strippath": "false",
+        "balanceinertia": "true",
+        "fusestatic": "false",
+    }
+    compiler = _merge_compiler_tag("<compiler/>", attrs)
+    if re.search(r"<mujoco[\s>]", xml):
+        if re.search(r"<compiler\b", xml):
+            return re.sub(
+                r"<compiler\b[^>]*?/?>",
+                lambda m: _merge_compiler_tag(m.group(0), attrs),
+                xml,
+                count=1,
+            )
+        return re.sub(r"(<mujoco\b[^>]*>)", r"\1" + compiler, xml, count=1)
+    return re.sub(
+        r"(<robot[^>]*>)",
+        r"\1" + f"<mujoco>{compiler}</mujoco>",
+        xml,
+        count=1,
+    )
+
+
+def _build_urdf(urdf: Path, opts: ViewOptions) -> BuiltModel:
     mimics = parse_mimics(urdf)
     xml = urdf.read_text(encoding="utf-8")
     meshdir = urdf.parent.as_posix()
-    inj = (
-        f'<mujoco><compiler discardvisual="false" meshdir="{meshdir}" '
-        f'strippath="false" balanceinertia="true" fusestatic="false"/></mujoco>'
-    )
-    xml = re.sub(r"(<robot[^>]*>)", r"\1" + inj, xml, count=1)
+    xml = _ensure_urdf_mujoco_compiler(xml, meshdir)
     spec = mujoco.MjSpec.from_string(xml)
     spec.modelname = urdf.stem
 
@@ -483,7 +696,7 @@ def build_model(urdf: Path, opts: ViewOptions) -> BuiltModel:
         joints=controllable,
         all_joints=all_joints,
         geoms=geoms,
-        urdf=urdf,
+        path=urdf,
         rgba_base=np.array(model.geom_rgba, copy=True),
         group_base=np.array(model.geom_group, copy=True),
     )

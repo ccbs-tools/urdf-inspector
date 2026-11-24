@@ -1,4 +1,4 @@
-"""入口：python -m urdf_inspector [urdf]
+"""入口：python -m urdf_inspector [file]
 
 顺序固定：先初始化日志，再 import mujoco / Qt 与业务模块，最后建 QApplication 和主窗口。
 """
@@ -26,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     from .main_window import MainWindow
 
     parser = argparse.ArgumentParser(description="urdf inspector (MuJoCo off-screen + Qt)")
-    parser.add_argument("urdf", nargs="?", help="可选：启动时加载的 .urdf 路径")
+    parser.add_argument("file", nargs="?", help="可选：启动时加载的 URDF（.urdf）或 MJCF（.xml）路径")
     args = parser.parse_args(argv)
 
     logger.info("=" * 60)
@@ -62,9 +62,9 @@ def main(argv: list[str] | None = None) -> int:
     win = MainWindow()
     win.setWindowIcon(icon)
     win.show()
-    if args.urdf:
-        logger.info("initial file from argv: {}", args.urdf)
-        win.load_urdf(args.urdf)
+    if args.file:
+        logger.info("initial file from argv: {}", args.file)
+        win.load_model(args.file)
     code = app.exec()
     logger.info("exit code={}", code)
     return code

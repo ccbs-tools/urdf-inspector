@@ -1,4 +1,4 @@
-"""MuJoCo 离屏渲染的 Qt 视口：拖放 URDF、鼠标轨道相机。"""
+"""MuJoCo 离屏渲染的 Qt 视口：拖放 URDF / MJCF、鼠标轨道相机。"""
 
 from __future__ import annotations
 
@@ -56,10 +56,13 @@ def close_renderer(renderer) -> None:
 
 
 class Viewport(QWidget):
-    """自绘 3D 区。发出 urdfDropped(path)。"""
+    """自绘 3D 区。发出 fileDropped(path)。"""
 
-    urdfDropped = Signal(str)
+    fileDropped = Signal(str)
     FPS = 30
+    # 能拖进来的扩展名；.xml 具体是 URDF 还是 MJCF 由 model.detect_format() 看根标签决定
+    DROP_SUFFIXES = (".urdf", ".xml")
+    ZOOM_RANGE = (0.2, 8.0)  # 固定取景（URDF）时相机距离的范围，米
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -84,19 +87,35 @@ class Viewport(QWidget):
         self._h = 0
         self._step_physics = False
         self._render_failures = 0
+        self._fit = False
+        self._zoom_range = self.ZOOM_RANGE
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(int(1000 / self.FPS))
         i18n.languageChanged.connect(self.update)  # 切换语言后重绘提示文字
 
-    def set_model(self, model: mujoco.MjModel, data: mujoco.MjData, *, physics: bool = False) -> None:
+    def set_model(
+        self,
+        model: mujoco.MjModel,
+        data: mujoco.MjData,
+        *,
+        physics: bool = False,
+        fit: bool = False,
+    ) -> None:
+        """fit=True：相机按模型自己的范围取景（MJCF，大小不定）；否则用固定的机械臂尺度取景。"""
         close_renderer(self.renderer)
         self.renderer = None
         self._render_failures = 0
         self.model = model
         self.data = data
         self._step_physics = physics
+        self._fit = fit
+        if fit:
+            ext = float(model.stat.extent)
+            self._zoom_range = (min(self.ZOOM_RANGE[0], 0.2 * ext), max(self.ZOOM_RANGE[1], 10.0 * ext))
+        else:
+            self._zoom_range = self.ZOOM_RANGE
         self.cam = mujoco.MjvCamera()
         self.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
         self.reset_view()
@@ -130,8 +149,13 @@ class Viewport(QWidget):
     def reset_view(self) -> None:
         if self.cam is None:
             return
-        self.cam.lookat[:] = [0.0, 0.0, 0.25]
-        self.cam.distance = 1.4
+        if self._fit and self.model is not None:
+            # 与 MuJoCo 自带查看器的默认自由相机一致：看向模型中心，距离 1.5 倍范围
+            self.cam.lookat[:] = self.model.stat.center
+            self.cam.distance = 1.5 * float(self.model.stat.extent)
+        else:
+            self.cam.lookat[:] = [0.0, 0.0, 0.25]
+            self.cam.distance = 1.4
         self.cam.azimuth = 135.0
         self.cam.elevation = -22.0
         self._dirty = True
@@ -231,7 +255,7 @@ class Viewport(QWidget):
     def dragEnterEvent(self, ev: QDragEnterEvent) -> None:
         if ev.mimeData().hasUrls():
             for u in ev.mimeData().urls():
-                if u.toLocalFile().lower().endswith(".urdf"):
+                if u.toLocalFile().lower().endswith(self.DROP_SUFFIXES):
                     ev.acceptProposedAction()
                     return
         ev.ignore()
@@ -239,8 +263,8 @@ class Viewport(QWidget):
     def dropEvent(self, ev: QDropEvent) -> None:
         for u in ev.mimeData().urls():
             path = u.toLocalFile()
-            if path.lower().endswith(".urdf"):
-                self.urdfDropped.emit(path)
+            if path.lower().endswith(self.DROP_SUFFIXES):
+                self.fileDropped.emit(path)
                 ev.acceptProposedAction()
                 return
         ev.ignore()
@@ -272,5 +296,6 @@ class Viewport(QWidget):
         if self.cam is None:
             return
         steps = ev.angleDelta().y() / 120.0
-        self.cam.distance = float(max(0.2, min(8.0, self.cam.distance * (0.9 ** steps))))
+        lo, hi = self._zoom_range
+        self.cam.distance = float(max(lo, min(hi, self.cam.distance * (0.9 ** steps))))
         self._dirty = True

@@ -91,14 +91,22 @@ class StlPreview(QWidget):
         self.update()
 
     def load(self, path: Path | str) -> bool:
+        """读网格文件并显示。"""
         path = Path(path)
+        return self._show(path.name, lambda: load_mesh(path), path)
+
+    def load_arrays(self, name: str, verts: np.ndarray, faces: np.ndarray) -> bool:
+        """直接显示内存里的网格（MJCF：数据取自编译后的模型，不读文件）。name 用作标题。"""
+        return self._show(name, lambda: (verts, faces), None)
+
+    def _show(self, name: str, get_mesh, path: Optional[Path]) -> bool:
         try:
-            verts, faces = load_mesh(path)
+            verts, faces = get_mesh()
             lo, hi, n_faces = verts.min(axis=0), verts.max(axis=0), len(faces)
             model = self._build_model(verts, faces, lo, hi)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("STL preview load failed: {} -> {!r}", path, exc)
-            self.clear(tr("stl.load_fail_box", name=path.name, err=exc))
+            logger.warning("STL preview load failed: {} -> {!r}", path or name, exc)
+            self.clear(tr("stl.load_fail_box", name=name, err=exc))
             self.statusMessage.emit(tr("stl.load_fail_status", err=exc))
             return False
 
@@ -111,7 +119,7 @@ class StlPreview(QWidget):
         ext = hi - lo
         unit = "mm?" if ext.max() > 5.0 else "m"
         self.title = (
-            f"{path.name}  ·  {n_faces:,} faces  ·  "
+            f"{name}  ·  {n_faces:,} faces  ·  "
             f"{ext[0]:.4g} × {ext[1]:.4g} × {ext[2]:.4g} ({unit})"
         )
         self.cam.azimuth = 225.0

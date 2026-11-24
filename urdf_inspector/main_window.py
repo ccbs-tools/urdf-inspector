@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 from .changelog import REPO_HOME, VIDEO_TUTORIAL
 from .i18n import LANGUAGES, i18n, tr
 from .log import LOG_DIR, logger
-from .model import BuiltModel, GeomInfo, ViewOptions, build_model
+from .model import BuiltModel, GeomInfo, ModelFormatError, ViewOptions, build_model, mesh_arrays
 from .stl_view import StlPreview
 from .version_dialogs import ChangelogDialog, UpdateCheckDialog
 from .viewport import Viewport
@@ -118,19 +118,20 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.resize(1000, 800)
-        self.setAcceptDrops(True)  # 整个窗口（含菜单栏、状态栏、左栏）都能拖入 URDF，转交给视口处理
+        self.setAcceptDrops(True)  # 整个窗口（含菜单栏、状态栏、左栏）都能拖入模型文件，转交给视口处理
 
-        self._urdf: Optional[Path] = None
+        self._model_path: Optional[Path] = None  # 当前加载的 URDF / MJCF
         self._built: Optional[BuiltModel] = None
         self._opts = ViewOptions()
         self._sliders: Dict[str, JointSlider] = {}
         self._physics = False
         self._highlight_ids: Set[int] = set()
         self._geom_by_id: Dict[int, GeomInfo] = {}
-        self._stl_loaded: Optional[Path] = None
+        # STL 预览当前显示的内容：URDF 是网格文件路径，MJCF 是 (模型路径, 网格名)
+        self._stl_loaded: Optional[object] = None
 
         self.viewport = Viewport()
-        self.viewport.urdfDropped.connect(self.load_urdf)
+        self.viewport.fileDropped.connect(self.load_model)
         self.stl_preview = StlPreview()
         self.stl_preview.statusMessage.connect(self.statusBar().showMessage)
 
@@ -154,7 +155,7 @@ class MainWindow(QMainWindow):
         self.stl_preview.shutdown()
         super().closeEvent(ev)
 
-    # 拖放：视口自己能接；落在窗口其它位置的由这里转交给视口（判断 .urdf、发 urdfDropped）
+    # 拖放：视口自己能接；落在窗口其它位置的由这里转交给视口（判断扩展名、发 fileDropped）
     def dragEnterEvent(self, ev) -> None:
         self.viewport.dragEnterEvent(ev)
 
@@ -275,21 +276,26 @@ class MainWindow(QMainWindow):
         self.btn_collapse.setText(tr("geom.collapse"))
         self.geom_tip.setText(tr("geom.tip"))
         self.joints_box.setTitle(tr("joints.box"))
+        self.joints_note.setText(tr("joints.view_only"))
 
         self._update_title()
-        if self._urdf is None:
+        if self._model_path is None:
             self._path_label.setText(tr("path.none"))
             self.statusBar().showMessage(tr("status.drop_hint"))
         elif self._built is not None:
-            self.statusBar().showMessage(
-                tr("status.loaded", name=self._urdf.name, n=len(self._built.joints))
-            )
+            self.statusBar().showMessage(self._loaded_status())
+
+    def _loaded_status(self) -> str:
+        assert self._built is not None and self._model_path is not None
+        if self._built.kind == "mjcf":
+            return tr("status.loaded_view", name=self._model_path.name, n=len(self._built.geoms))
+        return tr("status.loaded", name=self._model_path.name, n=len(self._built.joints))
 
     def _update_title(self) -> None:
-        if self._urdf is None:
+        if self._model_path is None:
             self.setWindowTitle(tr("app.title"))
         else:
-            self.setWindowTitle(f"{tr('app.title')} — {self._urdf.name}")
+            self.setWindowTitle(f"{tr('app.title')} — {self._model_path.name}")
 
     def _build_left_panel(self) -> QWidget:
         """左栏：显示选项 / 连杆几何 / 关节控制，整体放在一个竖向滚动区里。"""
@@ -387,8 +393,17 @@ class MainWindow(QMainWindow):
         root.addWidget(self.geom_box)
 
         self.joints_box = QGroupBox()
-        self._joints_lay = QVBoxLayout(self.joints_box)
+        joints_box_lay = QVBoxLayout(self.joints_box)
+        # MJCF 只看模式下显示的说明（此时没有滑条）
+        self.joints_note = QLabel()
+        self.joints_note.setWordWrap(True)
+        self.joints_note.setStyleSheet("color: #90a4ae; font-size: 11px;")
+        self.joints_note.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.joints_note.hide()
+        joints_box_lay.addWidget(self.joints_note)
+        self._joints_lay = QVBoxLayout()
         self._joints_lay.addStretch(1)
+        joints_box_lay.addLayout(self._joints_lay)
         root.addWidget(self.joints_box)
 
         self._path_label = QLabel()
@@ -407,7 +422,7 @@ class MainWindow(QMainWindow):
         return scroll
 
     def _build_right_panel(self) -> QWidget:
-        """右栏：上 URDF 仿真，下 STL 预览，中间留一条可拖动的间隙。"""
+        """右栏：上模型仿真视口，下 STL 预览，中间留一条可拖动的间隙。"""
         split = QSplitter(Qt.Orientation.Vertical)
         split.addWidget(self.viewport)
         split.addWidget(self.stl_preview)
@@ -422,11 +437,11 @@ class MainWindow(QMainWindow):
             self, tr("dialog.open_title"), "", tr("dialog.open_filter")
         )
         if path:
-            self.load_urdf(path)
+            self.load_model(path)
 
     def _reload(self) -> None:
-        if self._urdf:
-            self.load_urdf(str(self._urdf))
+        if self._model_path:
+            self.load_model(str(self._model_path))
 
     def _collect_opts(self) -> ViewOptions:
         return ViewOptions(
@@ -440,14 +455,14 @@ class MainWindow(QMainWindow):
         )
 
     def _apply_options(self) -> None:
-        if not self._urdf:
+        if not self._model_path:
             return
         q_keep = self._snapshot_joints()
         self._opts = self._collect_opts()
         try:
-            built = build_model(self._urdf, self._opts)
+            built = build_model(self._model_path, self._opts)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, tr("dialog.rebuild_fail"), str(exc))
+            QMessageBox.critical(self, tr("dialog.rebuild_fail"), self._error_text(exc))
             return
         self._install_built(built, q_keep=q_keep)
 
@@ -455,28 +470,40 @@ class MainWindow(QMainWindow):
         self._physics = on
         self.viewport.set_physics(on)
 
-    def load_urdf(self, path: str) -> None:
-        urdf = Path(path)
-        if not urdf.is_file():
+    @staticmethod
+    def _error_text(exc: Exception) -> str:
+        """加载失败给用户看的文字：格式问题有对应文案，其余（MuJoCo 的编译错误等）原样显示。"""
+        if isinstance(exc, ModelFormatError):
+            return tr(f"dialog.err_{exc.code}", **exc.params)
+        return str(exc)
+
+    def load_model(self, path: str) -> None:
+        """加载 URDF 或 MJCF（按文件的 XML 根标签区分，见 model.detect_format）。"""
+        src = Path(path)
+        if not src.is_file():
             logger.warning("file not found: {}", path)
             QMessageBox.warning(self, tr("dialog.no_file"), path)
             return
-        logger.info("loading URDF: {}", urdf)
+        logger.info("loading model: {}", src)
         self._opts = self._collect_opts()
         try:
-            built = build_model(urdf, self._opts)
+            built = build_model(src, self._opts)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("load failed: {}", urdf)
-            QMessageBox.critical(self, tr("dialog.load_fail"), str(exc))
+            if isinstance(exc, ModelFormatError):
+                logger.warning("not a loadable model: {} ({})", src, exc)  # 用户拖错文件，不用堆栈
+            else:
+                logger.exception("load failed: {}", src)
+            QMessageBox.critical(self, tr("dialog.load_fail"), self._error_text(exc))
             return
-        self._urdf = urdf
+        self._model_path = src
         self._install_built(built)
         self._update_title()
-        self._path_label.setText(str(urdf))
-        self.statusBar().showMessage(
-            tr("status.loaded", name=urdf.name, n=len(built.joints))
+        self._path_label.setText(str(src))
+        self.statusBar().showMessage(self._loaded_status())
+        logger.info(
+            "loaded {}: {} controllable joints, {} geoms",
+            built.kind, len(built.joints), len(built.geoms),
         )
-        logger.info("loaded: {} controllable joints, {} geoms", len(built.joints), len(built.geoms))
 
     def _snapshot_joints(self) -> Dict[str, float]:
         return {name: sl.value() for name, sl in self._sliders.items()}
@@ -497,6 +524,13 @@ class MainWindow(QMainWindow):
         self._clear_joint_layout(self._joints_lay)
         self._rebuild_geom_tree(built)
 
+        # MJCF 只看不动：没有滑条，重力 / 物理步进 / 复位关节都不可用
+        view_only = built.kind == "mjcf"
+        self.joints_note.setVisible(view_only)
+        for w in (self.chk_gravity, self.chk_physics, self.btn_home):
+            w.setEnabled(not view_only)
+        self.act_home.setEnabled(not view_only)
+
         for info in built.joints:
             q0 = float(built.data.qpos[info.qposadr])
             if q_keep and info.name in q_keep:
@@ -508,7 +542,9 @@ class MainWindow(QMainWindow):
             sl.set_value(q0)
             self._write_ctrl(info.name, q0)
 
-        self.viewport.set_model(built.model, built.data, physics=self._physics)
+        self.viewport.set_model(
+            built.model, built.data, physics=self._physics and not view_only, fit=view_only
+        )
         mujoco.mj_forward(built.model, built.data)
         if prev_keys:
             self._reselect_geom_keys(prev_keys)
@@ -620,21 +656,32 @@ class MainWindow(QMainWindow):
 
     def _update_stl_preview(self) -> None:
         # 多选时用最后选中的带 mesh 的项
-        path: Optional[Path] = None
+        chosen: Optional[GeomInfo] = None
         for it in self.geom_tree.selectedItems():
             gid = it.data(0, ROLE_GEOM_ID)
             if gid is None:
                 continue
             g = self._geom_by_id.get(int(gid))
-            if g and g.mesh_path:
-                path = g.mesh_path
-        if path is None:
+            if g and (g.mesh_path or g.mesh_id >= 0):
+                chosen = g
+        if chosen is None:
             if self._highlight_ids:
                 self.stl_preview.clear(tr("stl.no_mesh"))
             else:
                 self.stl_preview.clear()
             self._stl_loaded = None
             return
+        if chosen.mesh_path is None:
+            # MJCF：不找网格文件，直接用编译后模型里的顶点和面
+            assert self._built is not None
+            key = (self._model_path, chosen.mesh)
+            if self._stl_loaded == key:
+                return
+            verts, faces = mesh_arrays(self._built.model, chosen.mesh_id)
+            ok = self.stl_preview.load_arrays(chosen.mesh, verts, faces)
+            self._stl_loaded = key if ok else None
+            return
+        path = chosen.mesh_path
         if not path.is_file():
             self.stl_preview.clear(tr("stl.not_found", path=path))
             self._stl_loaded = None
@@ -664,11 +711,10 @@ class MainWindow(QMainWindow):
             g = self._geom_by_id.get(gid)
             if g is None:
                 continue
-            if g.kind == "collision":
+            if self._built.group_base[gid] > 2:
+                # 在默认不画的分组里（碰撞体等）：高亮时临时挪到 group 0 显示出来
                 model.geom_group[gid] = 0
-                model.geom_rgba[gid] = HL_COLLISION
-            else:
-                model.geom_rgba[gid] = HL_VISUAL
+            model.geom_rgba[gid] = HL_COLLISION if g.kind == "collision" else HL_VISUAL
         self.viewport.mark_dirty()
         n = len(self._highlight_ids)
         self.statusBar().showMessage(tr("status.highlight", n=n))

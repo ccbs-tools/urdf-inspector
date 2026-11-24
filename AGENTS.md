@@ -25,10 +25,11 @@
 - §10 `meshio.py` 抛出的 `ValueError` 文本是中文，会经 `stl.load_fail_box` / `stl.load_fail_status` 显示给用户，没有走 `tr()`。这些是底层读网格的错误，出现频率低，暂不拆成文案键。
 - §11 仿真视口只有鼠标操作和双击复位，没有 `F` / `W` / `G` / `A` / `R` 快捷键（STL 预览有）；仿真视口的线框、网格开关没有对应功能。
 - §11 不设置 `QSurfaceFormat`：本工具不用 `QOpenGLWidget`，两个视口都是 MuJoCo 离屏渲染后用 `QPainter` 贴图（Qt 的 GL 上下文会和 MuJoCo 的 GLFW 上下文互抢，见 `stl_view.py` 开头）。
-- 入口与模板不同：`__main__.py` 用 `argparse` 解析可选的 `[urdf]` 参数（模板直接取 `argv[0]`），主窗口构造不带初始文件、由入口调用 `load_urdf()`。
+- 入口与模板不同：`__main__.py` 用 `argparse` 解析可选的 `[file]` 参数（模板直接取 `argv[0]`），主窗口构造不带初始文件、由入口调用 `load_model()`。
 
 ## 本项目特有的注意点
 
 - Python 固定 3.12（`.python-version`），本地 uv 和 CI 的 `uv sync` 都读它；`requires-python` 仍按规范写 `>=3.12`。
 - mujoco 4.x 拆成 `mujoco-core` / `mujoco-studio` 等包并装进同一个 `mujoco/` 目录；`main.spec` 里的 `_MJ_DROP` 把 Studio、文档、头文件等剔出打包。升级 mujoco 后要重新打包并实际运行一次 exe 确认。
+- 模型按 XML 根标签分两条路（`model.detect_format()`）：URDF 走 `_build_urdf()`，按本工具的约定重建；MJCF 走 `_build_mjcf()`，只看不动——只允许加不影响物理的显示内容，不要在这里改碰撞位、执行器、阻尼、关键帧，也不要给 MJCF 加关节滑条 / 物理步进（要支持得另外设计：模型自带执行器、速度环、自由关节、`weld` 约束都要处理）。
 - `viewport.close_renderer()` 依赖 `mujoco.Renderer` 的私有属性 `_gl_context`（4.0.1 仍存在），升级 mujoco 时留意。
